@@ -266,3 +266,33 @@ int closing(int des)
     return close(des);
 } // .closing()
 
+
+// myReadcond: Attempts to read data from a socket with specific conditions,
+//             such as requiring a minimum number of bytes before returning.
+//            Uses mapMutex and desInfoMap to locate the socket information and calls the reading method if the socket information is available.
+int myReadcond(int des, void * buf, int n, int min, int time, int timeout) {
+//des: The socket descriptor to read from.
+//buf: A pointer to the buffer where the data will be stored.
+//n: The number of bytes to read.
+//min: The minimum number of bytes required to complete the read operation.
+//time and timeout: Timing parameters for the read operation.
+    
+    // Acquire a shared lock on mapMutex to safely access desInfoMap
+    //It is not unlocked as it will release the lock when it goes out of scope 
+    shared_lock desInfoLk(mapMutex);
+
+    // Calls get_or to retrieve the shared_ptr to the socketInfoClass associated with the socket descriptor des from desInfoMap.
+    // If des is not found in desInfoMap, returns nullptr.
+    auto desInfoP{get_or(desInfoMap, des, nullptr)}; // make a local shared pointer
+
+    // If socket information is found in desInfoMap (desInfoP is valid),
+    // call the reading method to perform a conditional read and pass the parameters as seen in the brackets.
+    if (desInfoP)
+        return desInfoP->reading(des, buf, n, min, time, timeout, desInfoLk);
+
+    // If desInfoP is nullptr (socket not found in desInfoMap),
+    // fall back to wcsReadcond to handle conditional reading.
+    return wcsReadcond(des, buf, n, min, time, timeout);
+
+    
+}
