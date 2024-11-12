@@ -96,3 +96,32 @@ int draining(shared_lock<shared_mutex> &desInfoLk)
     return 0;
 }
 
+// writing: Writes data to the socket and updates the total amount of data written(totalWritten).
+//          Also notifies readers that new data is available.
+// writes nbyte bytes from buf to the socket represented by descriptor buf
+int writing(int des, const void* buf, size_t nbyte, shared_lock<shared_mutex> &desInfoLk)
+{
+    // Lock the socketInfoMutex for exclusive access to this socket's state.
+    lock_guard socketLk(socketInfoMutex);
+    
+    // Release the shared lock on mapMutex, allowing other threads to access desInfoMap.
+    desInfoLk.unlock();
+
+    // Writing data to the socket: Conditionally compiled code(ifdef): writes to a circular buffer if CIRCBUF is defined,
+    // otherwise, writes directly to the socket.
+#ifdef CIRCBUF
+    int written = circBuffer.write((const char*) buf, nbyte); // Write to circular buffer.
+#else
+    int written = write(des, buf, nbyte); // Write data to socket directly.
+#endif
+
+    // If data was successfully written (written > 0), update totalWritten and notify readers.
+    if (written > 0) {
+        totalWritten += written;     // Update totalWritten to reflect the new data sent.
+        cvRead.notify_one();         // Notify one waiting reader that data is available.
+    }
+
+    // Return the number of bytes written to indicate success or failure to the caller.
+    return written;
+}
+
