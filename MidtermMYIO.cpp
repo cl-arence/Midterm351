@@ -66,6 +66,8 @@ class socketInfoClass {
 public:
     int pair; // Descriptor of paired socket; set to -1 if this socket descriptor is closed, -2 if paired socket(descriptor) is closed.
 //pair allows mywrite and mytcdrain to reference a paired socket, ensuring operations on one socket are synchronized with its pair
+//If pair == -2, it means the paired socket has been closed.
+//If pair >= 0, it’s a valid socket descriptor representing the other end of the socket pair.
 
     // Constructor initializes the pair variable with the descriptor of the paired socket.Ensures each instance of Sockeinfoclass has a reference to its paired socket
     socketInfoClass(unsigned pairInit)
@@ -294,5 +296,62 @@ int myReadcond(int des, void * buf, int n, int min, int time, int timeout) {
     // fall back to wcsReadcond to handle conditional reading.
     return wcsReadcond(des, buf, n, min, time, timeout);
 
-    
 }
+
+// myRead(wrapper around standard read): Attempts to read data from a socket, ensuring a minimum of 1 byte(minimal conditional read) is read if the socket
+//         is managed by mySocketpair. Uses desInfoMap to manage socket state if available.
+//uses desInfoMap to track socket state if mySocketpair created the socket
+//attempts to read nbyte bytes from a socket represented by des into buf
+ssize_t myRead(int des, void* buf, size_t nbyte) {
+   
+    // Acquire a shared lock on mapMutex to safely access desInfoMap for thread-safe reading.
+    shared_lock desInfoLk(mapMutex);
+
+    // Retrieve the shared pointer to the socket's state information from desInfoMap.
+    // If the socket descriptor is not in desInfoMap, returns nullptr.
+    auto desInfoP{get_or(desInfoMap, des, nullptr)};
+
+    //If socket information is found in desInfoMap (desInfoP is valid), call reading on the socket's state.
+    // Passes a minimum read condition of 1 byte to simulate typical socket behavior.
+    //myRead sets min to 1, ensuring at least 1 byte is read without specifying additional conditions.
+    //myReadcond allows a customizable min, letting the caller specify a different minimum byte requirement.
+    //myRead uses 0 for both time and timeout, meaning it won’t wait for additional time beyond data availability.
+    //myReadcond accepts custom values for time and timeout, allowing the caller to control how long the function will wait if data isn’t immediately available.
+    if (desInfoP)
+        return desInfoP->reading(des, buf, nbyte, 1, 0, 0, desInfoLk);
+
+    // If desInfoP is nullptr (socket not found in desInfoMap), fall back to standard system read.
+    return read(des, buf, nbyte);
+}
+
+// myWrite: Attempts to write data to a socket, checking if it is part of a socket pair
+//using desInfoMap to check the socket’s state and synchronize with the paired socket if it exists.
+//It defaults to a standard write if the socket is not managed by mySocketpair
+//or if the paired socket is closed.
+//attempts to write nbyte bytes from buf to the socket descriptor des.
+ssize_t myWrite(int des, const void* buf, size_t nbyte) {
+    {
+        // Acquire a shared lock on mapMutex to safely access desInfoMap.
+        shared_lock desInfoLk(mapMutex);
+
+        // Call get-or to retrieve the shared pointer to the socket's state from desInfoMap.
+        // If the socket descriptor is not in desInfoMap, desInfoP will be nullptr.
+        auto desInfoP{get_or(desInfoMap, des, nullptr)};
+        
+        // If socket information is found in desInfoMap (desInfoP is valid),
+        if (desInfoP) {
+            // Retrieve the paired socket descriptor's value from the socket's state information.
+            auto pair{desInfoP->pair};
+
+            // If the paired socket is still open (pair is not -2), attempt a synchronized write
+            // using the writing function of the paired socket.
+            if (-2 != pair)
+                return desInfoMap[pair]->writing(des, buf, nbyte, desInfoLk);
+        }
+    }
+    
+    // If the socket descriptor is not found in desInfoMap or the paired socket is closed,
+    // fall back to the standard system write function for direct writing.
+    return write(des, buf, nbyte);
+}
+
