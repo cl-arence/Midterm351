@@ -1,3 +1,27 @@
+// use a circular buffer instead of read() and write() functions.
+//#define CIRCBUF
+
+#include <sys/socket.h>
+#include <unistd.h>				// for posix i/o functions
+#include <stdlib.h>
+#include <termios.h>			// for tcdrain()
+#include <fcntl.h>				// for open/creat
+#include <errno.h>
+#include <stdarg.h>
+#include <mutex>				
+#include <shared_mutex>
+#include <condition_variable>	
+#include <map>
+#include <memory>
+#include "AtomicCOUT.h"
+#include "SocketReadcond.h"
+#include "VNPE.h"
+#ifdef CIRCBUF
+    #include "RageUtil_CircularBuffer.h"
+#endif
+
+using namespace std;
+
 // Template function to retrieve a value for a key in a map or return a default if the key is not found.
 // Useful for safely accessing socket descriptor information in desInfoMap.
 template <typename Key, typename Value, typename T>
