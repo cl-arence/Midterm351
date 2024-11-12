@@ -152,15 +152,16 @@ int reading(int des, void * buf, int n, int min, int time, int timeout, shared_l
     //also ensures synchronization between writer and reader using cvDrain  
     // Check if sufficient data is available to read without waiting.
     else if (!maxTotalCanRead && totalWritten >= (unsigned) min) {
+        // If no minimum data is required and no data is available, return 0 bytes read.
         if (0 == min && 0 == totalWritten)
-            bytesRead = 0; // If no minimum data is required and no data is available, return 0 bytes read.
+            bytesRead = 0; 
         else {
 #ifdef CIRCBUF
             bytesRead = circBuffer.read((char *) buf, n); // Read from circular buffer if CIRCBUF is defined.
 #else
             bytesRead = read(des, buf, n); // Directly read data from the socket if circbuf is not defined
 #endif
-            //if data is read, update totalwritten and notify cvDrain if conditios are met
+            //if data is read, update totalwritten and notify cvDrain if conditions are met
             if (bytesRead > 0) {
                 totalWritten -= bytesRead; // Update totalWritten after reading.
                 // Notify all waiting writers if enough data has been drained.
@@ -221,4 +222,47 @@ int reading(int des, void * buf, int n, int min, int time, int timeout, shared_l
     }
     return bytesRead; // Return the number of bytes read.
 } // .reading()
+
+
+// closing: Safely closes a socket rep by des and synchronizes with the paired socket to avoid race conditions.
+//          Notifies any threads waiting on reads or writes to let them know the socket is closed.
+
+int closing(int des)
+{
+    // mapMutex is already locked when calling this function, so no other myClose (or mySocketpair) can proceed.
+
+    // Check if the paired socket has already been closed.
+    if (pair != -2) { // Only proceed if the paired socket is still open. Since no need to close if its already closed 
+
+        // Get the socketInfoClass instance of the paired socket from desInfoMap.
+        //Retrieves the shared_ptr for the paired socket’s socketInfoClass from desInfoMap
+        socketInfoClassSp des_pair{desInfoMap[pair]};
+
+        // Lock both this socket’s mutex and the paired socket’s mutex to avoid race conditions.
+        //Uses scoped_lock to lock both socketInfoMutex (for the current socket) and des_pair->socketInfoMutex (for the paired socket).
+        scoped_lock guard(socketInfoMutex, des_pair->socketInfoMutex);
+
+        pair = -1;            // Mark this socket as the first of the pair to close.
+        des_pair->pair = -2;  // Mark the paired socket as the second to close.
+
+        //Checks if totalWritten > maxTotalCanRead, meaning there’s data that hasn’t yet been read from this socket.
+        if (totalWritten > maxTotalCanRead) {
+            // Notify any threads waiting on myTcdrain that the socket is closing,
+            // since this will discard any unread buffered data.
+            cvDrain.notify_all();
+        }
+
+        //Checks if des_pair->maxTotalCanRead > 0, which would mean there’s a thread potentially waiting on a read from the paired socket.
+        if (des_pair->maxTotalCanRead > 0) {
+            // Notify any thread waiting on reading from the paired socket.
+            // This signals that no more data will be written since this socket is closed and this is because: 
+            //The reader thread that’s waiting on cvRead will wake up and check the socket state (such as pair < 0).
+            //By examining pair, the reader can determine if the socket has been closed.
+            des_pair->cvRead.notify_one();
+        }
+    }
+
+    // Use the system's close function to close the socket descriptor.
+    return close(des);
+} // .closing()
 
