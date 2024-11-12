@@ -77,3 +77,22 @@ public:
     }
 };
 
+// draining: Waits until all data written to the socket has been read (used by myTcdrain to ensure synch btw writer and reader).
+int draining(shared_lock<shared_mutex> &desInfoLk)
+{
+    // Acquire a unique lock on socketInfoMutex for exclusive access to this socket's state variables totalWritten and maxTotalCanRead.
+    //Since it accesses state vars and we need exclusive access to avoid conflicts with other threads 
+    unique_lock socketLk(socketInfoMutex);
+    
+    // Release the shared lock on mapMutex, allowing other threads to access desInfoMap.
+    desInfoLk.unlock();
+
+    // Check if the paired socket is open (pair >= 0) and if there is unread data (totalWritten > maxTotalCanRead).
+    // If both conditions are true, wait on cvDrain until notified by a reader.
+    if (pair >= 0 && totalWritten > maxTotalCanRead)
+        cvDrain.wait(socketLk); // Waits until data is drained. Linux pthreads handle spurious wakeups.
+
+    // Return 0 to indicate successful completion of the drain operation.
+    return 0;
+}
+
