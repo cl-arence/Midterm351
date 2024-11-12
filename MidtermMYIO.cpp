@@ -269,7 +269,7 @@ int closing(int des)
 
 // myReadcond: Attempts to read data from a socket with specific conditions,
 //             such as requiring a minimum number of bytes before returning.
-//            Uses mapMutex and desInfoMap to locate the socket information and calls the reading method if the socket information is available.
+//            Uses mapMutex and desInfoMap to locate socket info and calls the reading method if socket info is available 
 int myReadcond(int des, void * buf, int n, int min, int time, int timeout) {
 //des: The socket descriptor to read from.
 //buf: A pointer to the buffer where the data will be stored.
