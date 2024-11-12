@@ -125,3 +125,92 @@ int writing(int des, const void* buf, size_t nbyte, shared_lock<shared_mutex> &d
     return written;
 }
 
+
+// reading: Reads data from a socket and manages synchronization with the writer.
+// handles cases like connection state, timeouts and synch with writing and draining 
+//          Waits for sufficient data if necessary and updates totalWritten to track data flow.
+
+//reads n bytes from the socket identified by des into buf
+//min: Minimum number of bytes required before returning.
+//time and timeout: Conditions for blocking behavior, but only immediate timeout (0) is supported.
+//desInfoLk: A reference to a shared lock on mapMutex, which ensures safe access to desInfoMap
+int reading(int des, void * buf, int n, int min, int time, int timeout, shared_lock<shared_mutex> &desInfoLk)
+{
+    int bytesRead; // Holds the number of bytes read.
+    
+    // Acquire a unique lock on socketInfoMutex for exclusive access to socket state.
+    unique_lock socketLk(socketInfoMutex);
+    
+    // Release the shared lock on mapMutex, allowing other threads to access desInfoMap.
+    desInfoLk.unlock();
+
+    // If the paired socket is closed, return 0 bytes read to avoid connection reset errors.
+    if (-2 == pair)
+        bytesRead = 0;
+
+    //reading data if available (totalWritten >= min) ie totalWritten has met minimum read requirement to ensure data availability before reading 
+    //also ensures synchronization between writer and reader using cvDrain  
+    // Check if sufficient data is available to read without waiting.
+    else if (!maxTotalCanRead && totalWritten >= (unsigned) min) {
+        if (0 == min && 0 == totalWritten)
+            bytesRead = 0; // If no minimum data is required and no data is available, return 0 bytes read.
+        else {
+#ifdef CIRCBUF
+            bytesRead = circBuffer.read((char *) buf, n); // Read from circular buffer if CIRCBUF is defined.
+#else
+            bytesRead = read(des, buf, n); // Directly read data from the socket if circbuf is not defined
+#endif
+            //if data is read, update totalwritten and notify cvDrain if conditios are met
+            if (bytesRead > 0) {
+                totalWritten -= bytesRead; // Update totalWritten after reading.
+                // Notify all waiting writers if enough data has been drained.
+                if (totalWritten <= maxTotalCanRead) {
+                    int errnoHold{errno};
+                    cvDrain.notify_all();
+                    errno = errnoHold;
+                }
+            }
+        }
+    }
+        
+    // If not enough data is available (totalWritten < min) , adjust maxTotalCanRead and wait for more data.
+    else {
+        maxTotalCanRead += n; // Allow n more bytes to be read in the next read operation.
+        int errnoHold{errno}; // Hold errno to restore after wait.
+        cvDrain.notify_all(); // Notify writers that reader is ready to read more data.
+
+        // Verifies time and timeout are zero; otherwise, exits, as only immediate timeout is supported.
+        if (0 != time || 0 != timeout) {
+            COUT << "Currently only supporting no timeouts or immediate timeout" << endl;
+            exit(EXIT_FAILURE);
+        }
+
+        // Wait until sufficient data is available or paired socket is closed.
+        cvRead.wait(socketLk, [this, min] {
+            return totalWritten >= (unsigned) min || pair < 0;
+        });
+        errno = errnoHold;
+
+#ifdef CIRCBUF
+        bytesRead = circBuffer.read((char *) buf, n); // Read data from circular buffer.
+        totalWritten -= bytesRead;
+#else
+        bytesRead = read(des, buf, n); // Directly read data from the socket.
+        // Handle connection reset by peer error.
+        if (-1 != bytesRead)
+            totalWritten -= bytesRead;
+        else if (ECONNRESET == errno)
+            bytesRead = 0;
+#endif
+
+        // Adjust maxTotalCanRead back and notify if more data is still available.
+        maxTotalCanRead -= n;
+        if (0 < totalWritten || -2 == pair) {
+            int errnoHold{errno}; 
+            cvRead.notify_one(); // Notify a waiting reader.
+            errno = errnoHold;
+        }
+    }
+    return bytesRead; // Return the number of bytes read.
+} // .reading()
+
