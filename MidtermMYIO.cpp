@@ -38,12 +38,12 @@ Value get_or(std::map<Key, Value>& m, const Key& key, T&& default_value)
     // If key is found, return the corresponding value.
     return it->second;
 }
-// socketInfoClass: Stores information and synchronization controls for each socket in a socket pair.
+// socketInfoClass: Stores information and synchronization controls for each socket in a socket pair. Below is the declaration
 class socketInfoClass;
 
-typedef shared_ptr<socketInfoClass> socketInfoClassSp; // Defines an alias for a shared pointer to socketInfoClass.
+typedef shared_ptr<socketInfoClass> socketInfoClassSp; // Defines an alias(ie a shorthand) for a shared pointer to socketInfoClass.
 
-map<int, socketInfoClassSp> desInfoMap; // Maps each socket descriptor (int key) to a shared_ptr of socketInfoClass, holding its state.
+map<int, socketInfoClassSp> desInfoMap; // Defines a map that maps each socket descriptor (int key) to a shared_ptr of socketInfoClass, holding its state.
 
 // A shared mutex to protect desInfoMap, ensuring that only one thread can modify it at a time.
 // Allows multiple threads to hold shared (read) locks or one exclusive (write) lock for thread safety.
@@ -55,7 +55,7 @@ class socketInfoClass {
     unsigned maxTotalCanRead{0}; // Max bytes that can be read from the socket (used in myReadcond).
 
     condition_variable cvDrain; // Condition variable for managing myTcdrain (waits until data is fully read).
-    condition_variable cvRead; // Condition variable for notifying when data is available to be read.
+    condition_variable cvRead; // Condition variable for notifying when data is available to be read. Used by myreadcond()
 
 #ifdef CIRCBUF
     CircBuf<char> circBuffer; // Circular buffer for data storage if CIRCBUF is defined.
@@ -64,7 +64,8 @@ class socketInfoClass {
     mutex socketInfoMutex; // Mutex to ensure thread-safe access to this socket's state (like totalWritten).
 
 public:
-    int pair; // Descriptor of paired socket; set to -1 if this socket is closed, -2 if paired socket is closed.
+    int pair; // Descriptor of paired socket; set to -1 if this socket descriptor is closed, -2 if paired socket(descriptor) is closed.
+//pair allows mywrite and mytcdrain to reference a paired socket, ensuring operations on one socket are synchronized with its pair
 
     // Constructor initializes the pair variable with the descriptor of the paired socket.
     socketInfoClass(unsigned pairInit)
