@@ -186,23 +186,31 @@ int reading(int des, void * buf, int n, int min, int time, int timeout, shared_l
         }
 
         // Wait until sufficient data is available or paired socket is closed.
+        
+        //The cvRead.wait(socketLk, condition) function suspends the thread and releases socketLk, 
+        //allowing other threads to access socketInfoMutex.
+        //Condition: The thread resumes once totalWritten >= min 
+        //(enough data is available to read) or pair < 0 (the paired socket is closed).
         cvRead.wait(socketLk, [this, min] {
             return totalWritten >= (unsigned) min || pair < 0;
         });
         errno = errnoHold;
 
+        //reading after wait
 #ifdef CIRCBUF
         bytesRead = circBuffer.read((char *) buf, n); // Read data from circular buffer.
         totalWritten -= bytesRead;
 #else
         bytesRead = read(des, buf, n); // Directly read data from the socket.
-        // Handle connection reset by peer error.
+        
+        // then handle connection reset by peer error.
+        //ECCONNRESET happens when one end of a network socket is closed while the other end is still trying to communicate
         if (-1 != bytesRead)
             totalWritten -= bytesRead;
         else if (ECONNRESET == errno)
             bytesRead = 0;
 #endif
-
+        //notify waiting writers after read
         // Adjust maxTotalCanRead back and notify if more data is still available.
         maxTotalCanRead -= n;
         if (0 < totalWritten || -2 == pair) {
