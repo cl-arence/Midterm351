@@ -67,7 +67,7 @@ public:
     int pair; // Descriptor of paired socket; set to -1 if this socket descriptor is closed, -2 if paired socket(descriptor) is closed.
 //pair allows mywrite and mytcdrain to reference a paired socket, ensuring operations on one socket are synchronized with its pair
 
-    // Constructor initializes the pair variable with the descriptor of the paired socket.
+    // Constructor initializes the pair variable with the descriptor of the paired socket.Ensures each instance of Sockeinfoclass has a reference to its paired socket
     socketInfoClass(unsigned pairInit)
     : pair(pairInit) 
     {
