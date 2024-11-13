@@ -355,3 +355,38 @@ ssize_t myWrite(int des, const void* buf, size_t nbyte) {
     return write(des, buf, nbyte);
 }
 
+// myTcdrain: Ensures that all written data has been fully transmitted from the buffer associated with
+//            the socket descriptor `des`. If `des` is part of a socket pair, it calls draining function 
+//            on the paired socket to synch the drain operation
+// It falls back to standard system tcdrain function if the socket isnt in a pair. 
+int myTcdrain(int des) {
+    {
+        // Acquire a shared lock on mapMutex to safely access desInfoMap.
+        shared_lock desInfoLk(mapMutex);
+
+        // Call get-or to retrieve the shared pointer to the socket's state information from desInfoMap.
+        // If the socket descriptor is not in desInfoMap, desInfoP will be nullptr.
+        auto desInfoP{get_or(desInfoMap, des, nullptr)};
+
+        // If socket information is found in desInfoMap (desInfoP is valid),
+        if (desInfoP) {
+            // Retrieve the paired socket descriptor from the socket's state information.
+            auto pair{desInfoP->pair};
+
+            // If the paired descriptor is closed (pair is -2), no draining is needed, so return 0.
+            if (-2 == pair)
+                return 0;
+            else {
+                // If the paired socket is still open, create a shared pointer to its state information
+                //ie. retrieve the state information of a socket, which is stored in a shared_ptr<socketInfoClass> in desInfoMap
+                // and call draining to synchronize the drain operation on this paired socket.
+                auto desPairInfoSp{desInfoMap[pair]};
+                return desPairInfoSp->draining(desInfoLk);
+            }
+        }
+    }
+    
+    // If the socket descriptor is not found in desInfoMap or not part of a pair, fall back to standard tcdrain.
+    return tcdrain(des);
+}
+
