@@ -453,3 +453,33 @@ int myClose(int des) {
     // If `des` is not in desInfoMap, fall back to the standard system close function to close `des`.
     return close(des);
 }
+
+// myOpen: Wrapper around the standard open function, allowing optional handling of the mode argument.
+//         This function enables flexibility by conditionally using mode when required by flags.
+//pathname: The path to the file to open.
+//flags: Flags that specify how the file should be opened (e.g., read-only, read-write).
+//...: An ellipsis (...) indicates that this function can accept additional, optional arguments, typically the file mode.
+int myOpen(const char *pathname, int flags, ...) //, mode_t mode)
+{
+    //Initializes a mode_t variable named mode to 0 so it has a default value.
+    //mode will eventually hold the permissions with which to open the file if needed.
+    mode_t mode{0}; 
+    
+    // In theory, we should check here whether `mode` is required based on `flags`.
+    
+    va_list arg; // Declares a va_list variable named arg, which will manage the optional arguments passed after flags. va_list is a type in C/C++ for handling variable arguments in functions with ....
+    va_start(arg, flags); //Calls va_start, a macro that initializes arg for use with the additional arguments. va_start(arg, flags): Initializes arg to retrieve arguments after flags in the function call.
+    
+   //Calls va_arg to retrieve the next argument in arg as a mode_t value, storing it in mode.
+   //va_arg(arg, mode_t): Retrieves the next argument in arg, expecting it to be of type mode_t.
+    mode = va_arg(arg, mode_t); 
+    
+    //Calls va_end to clean up arg, completing the use of the variable arguments.
+    //va_end(arg): This is required to avoid potential memory leaks or undefined behavior by signaling that arg is no longer needed.
+    va_end(arg); 
+
+    // Call the standard open function with pathname, flags, and mode.
+    // final operation that opens the file. 
+    // By calling open, myOpen behaves just like the system open function but with additional flexibility in handling optional arguments.
+    return open(pathname, flags, mode);
+}
