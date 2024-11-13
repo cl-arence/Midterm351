@@ -390,3 +390,64 @@ int myTcdrain(int des) {
     return tcdrain(des);
 }
 
+// mySocketpair: Creates a pair of connected sockets and stores their state information
+//               in desInfoMap for custom management and synchronization.
+//               This function is a wrapper around the standard socketpair call.
+int mySocketpair(int domain, int type, int protocol, int des[2]) {
+    
+    // Call the standard system socketpair function to create a pair of connected sockets.
+    // If socketpair succeeds, it returns 0 and fills des[0] and des[1] with the descriptors of the new sockets.
+    //This connection enables read/write operations to flow between des[0] and des[1]
+    //If it fails, it returns -1.
+    int returnVal{socketpair(domain, type, protocol, des)};
+    
+    // If socketpair was successful (returnVal is not -1), proceed to store the socket states.
+    if (-1 != returnVal) {
+        
+        // Lock mapMutex to ensure exclusive access to desInfoMap while modifying it.
+        lock_guard desInfoLk(mapMutex);
+        
+       
+        //Then create a shared_ptr<socketInfoClass> for des[0], initialized with des[1] as its paired socket descriptor since:
+        //make_shared creates a shared_ptr to a new socketInfoClass object and;
+        //socketInfoClass(des[1]) constructs the new socketInfoClass instance with des[1] as the pair, establishing that des[0] is paired with des[1].
+        //LHS stores this shared_ptr in desInfoMap under the key des[0], allowing access to the state of socket des[0] through desInfoMap
+        desInfoMap[des[0]] = make_shared<socketInfoClass>(des[1]);
+        
+        // Now do the same and store state information for socket des[1], with des[0] as its paired socket descriptor.
+        desInfoMap[des[1]] = make_shared<socketInfoClass>(des[0]);
+    }
+    
+    // Return the result of socketpair (0 if successful, -1 if there was an error).
+    return returnVal;
+}
+
+// myClose: Closes a socket descriptor `des`. If `des` is managed by mySocketpair (exists in desInfoMap),
+//          it removes its state information from desInfoMap and synchronizes closure with any paired socket.
+//          If `des` is not in desInfoMap, it falls back to the standard close function.
+int myClose(int des) {
+    {
+        // Acquire an exclusive lock on mapMutex to ensure safe access to desInfoMap while modifying it.
+        lock_guard desInfoLk(mapMutex);
+
+        // Attempt to find the socket descriptor `des` in desInfoMap.
+        auto iter{desInfoMap.find(des)};
+        
+        // Check if `des` exists in desInfoMap (is managed by mySocketpair).
+        if (iter != desInfoMap.end()) {
+            // Retrieve the shared_ptr<socketInfoClass> associated with `des` in the map.
+            auto mySp{iter->second};
+            
+            // Remove `des` from desInfoMap, effectively deleting its state information entry.
+            desInfoMap.erase(iter);
+            
+            // If the shared pointer is valid, call the `closing` function in socketInfoClass
+            // to handle synchronized closing with any paired socket.
+            if (mySp)
+                return mySp->closing(des);
+        }
+    }
+    
+    // If `des` is not in desInfoMap, fall back to the standard close function to close `des`.
+    return close(des);
+}
