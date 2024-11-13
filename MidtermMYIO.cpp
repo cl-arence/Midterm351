@@ -52,7 +52,7 @@ shared_mutex mapMutex;
 // socketInfoClass holds state information and controls synchronization for a socket descriptor.
 class socketInfoClass {
     unsigned totalWritten{0}; // Total bytes written to the socket (used for tracking data in myWrite).
-    unsigned maxTotalCanRead{0}; // Max bytes that can be read from the socket (used in myReadcond).
+    unsigned maxTotalCanRead{0}; // Max bytes that can be read from the socket
 
     condition_variable cvDrain; // Condition variable for managing myTcdrain (waits until data is fully read).
     condition_variable cvRead; // Condition variable for notifying when data is available to be read. Used by myreadcond()
