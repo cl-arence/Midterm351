@@ -483,3 +483,14 @@ int myOpen(const char *pathname, int flags, ...) //, mode_t mode)
     // By calling open, myOpen behaves just like the system open function but with additional flexibility in handling optional arguments.
     return open(pathname, flags, mode);
 }
+
+// myCreat: Wrapper around the standard creat function. This function opens a file for writing,
+//          truncating it to zero length if it exists, or creating it with the specified mode if it doesn’t.
+//          It mirrors the behavior of creat without adding additional functionality.
+int myCreat(const char *pathname, mode_t mode)
+{
+    // Call the standard creat function:
+    // - If the file exists: Truncates it to zero length and opens it for writing.
+    // - If the file doesn’t exist: Creates it with the specified mode.
+    return creat(pathname, mode);
+}
