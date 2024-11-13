@@ -422,6 +422,7 @@ int mySocketpair(int domain, int type, int protocol, int des[2]) {
     return returnVal;
 }
 
+
 // myClose: Closes a socket descriptor `des`. If `des` is managed by mySocketpair (exists in desInfoMap),
 //          it removes its state information from desInfoMap and synchronizes closure with any paired socket.
 //          If `des` is not in desInfoMap, it falls back to the standard close function.
@@ -430,24 +431,25 @@ int myClose(int des) {
         // Acquire an exclusive lock on mapMutex to ensure safe access to desInfoMap while modifying it.
         lock_guard desInfoLk(mapMutex);
 
-        // Attempt to find the socket descriptor `des` in desInfoMap.
+        // Attempt to find the socket descriptor `des` in desInfoMap using find method.
+        // If des is in the map, iter will be an iterator pointing to its entry.
         auto iter{desInfoMap.find(des)};
         
-        // Check if `des` exists in desInfoMap (is managed by mySocketpair).
+        //Checks if iter is not equal to desInfoMap.end(), which would mean that des was found in desInfoMap
         if (iter != desInfoMap.end()) {
-            // Retrieve the shared_ptr<socketInfoClass> associated with `des` in the map.
+            // Retrieve the shared_ptr<socketInfoClass> associated with `des` in the map, stored in mySp
             auto mySp{iter->second};
             
             // Remove `des` from desInfoMap, effectively deleting its state information entry.
             desInfoMap.erase(iter);
             
-            // If the shared pointer is valid, call the `closing` function in socketInfoClass
-            // to handle synchronized closing with any paired socket.
+            // If the shared pointer is valid(mySp), call the `closing` function in socketInfoClass
+            // to handle synchronized closing with any paired socket esuring any paired soket is notified.
             if (mySp)
                 return mySp->closing(des);
         }
     }
     
-    // If `des` is not in desInfoMap, fall back to the standard close function to close `des`.
+    // If `des` is not in desInfoMap, fall back to the standard system close function to close `des`.
     return close(des);
 }
