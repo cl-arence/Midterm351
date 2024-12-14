@@ -60,5 +60,65 @@ class CircBuf {
 // - Writer adds data at `write_pos`, then advances it atomically.
 // - Reader consumes data from `read_pos`, then advances it atomically.
 
+public:
+/* 
+ * Writes up to `buffer_size` elements from the provided `buffer` into the circular buffer.
+ * Advances the `write_pos` pointer after writing.
+ *
+ * Key Details:
+ * - Handles buffer wrap-around when the data crosses the end of the buffer.
+ * - Ensures the buffer does not overwrite unread data by leaving at least one slot empty.
+ * - Thread-safe using atomic operations for `read_pos` and `write_pos`.
+ *
+ * Returns:
+ * - The number of elements successfully written to the buffer.
+ */
+unsigned write(const T *buffer, unsigned buffer_size) {
+    T *p[2];               // Pointers to segments where data will be written.
+    unsigned sizes[2];      // Sizes of the writable segments.
+
+    // Start writing at the current write position.
+    p[0] = buf + write_pos.load(memory_order_relaxed);
+
+    // Load the read position to determine available space, ensuring visibility across threads.
+    const unsigned rpos = read_pos.load(memory_order_acquire);
+
+    // Determine writable space in the buffer.
+    if (rpos <= write_pos.load(memory_order_relaxed)) {
+        // Case 1: Buffer does not wrap around ("eeeeDDDDeeee").
+        p[1] = buf;  // Second segment starts at the beginning of the buffer.
+        if (rpos) {
+            sizes[0] = size - write_pos.load(memory_order_relaxed); // Space until end of buffer.
+            sizes[1] = rpos - 1;  // Space before read position.
+        } else {
+            sizes[0] = size - write_pos.load(memory_order_relaxed) - 1; // Reserve one slot.
+            sizes[1] = 0; // No second segment needed.
+        }
+    } else {
+        // Case 2: Buffer wraps around ("DDeeeeeeeDD").
+        p[1] = nullptr; // No second segment used.
+        sizes[0] = rpos - write_pos.load(memory_order_relaxed) - 1; // Space before read position.
+        sizes[1] = 0;
+    }
+
+    // Ensure we only write as much as the buffer can fit.
+    buffer_size = min(buffer_size, sizes[0] + sizes[1]);
+
+    // Write data into the first segment.
+    const int from_first = min(buffer_size, sizes[0]);
+    memcpy(p[0], buffer, from_first * sizeof(T));
+
+    // If needed, write remaining data into the second segment.
+    if (buffer_size > sizes[0]) {
+        memcpy(p[1], buffer + from_first, (buffer_size - sizes[0]) * sizeof(T));
+    }
+
+    // Update the write position, wrapping around if necessary.
+    write_pos.store((write_pos.load(memory_order_relaxed) + buffer_size) % size, memory_order_release);
+
+    // Return the number of elements written.
+    return buffer_size;
+}
+
 
 
