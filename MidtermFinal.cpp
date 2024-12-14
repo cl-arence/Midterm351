@@ -74,41 +74,73 @@ public:
  * - The number of elements successfully written to the buffer.
  */
 unsigned write(const T *buffer, unsigned buffer_size) {
-    T *p[2];               // Pointers to segments where data will be written.
-    unsigned sizes[2];      // Sizes of the writable segments.
+    T *p[2];               
+   // This defines an array of two pointers (p[0] and p[1]). Each pointer represents a region of the buffer where data can be written.
+   //First Segment (p[0]): From write_pos to the end of the buffer.
+   //Second Segment (p[1]): From the start of the buffer to just before read_pos.
+   
+    unsigned sizes[2];     
+   // Sizes of the writable segments.
+   //Depending on the positions of write_pos and read_pos, the writable space is given by:
+   //sizes[0] : the free space after write_pos to the end of the buffer.
+   //sizes[1] : the free space from the start of the buffer to just before read_pos. (wrapped around block)
+   //If the buffer looks like "DDeeeeeeeeDD", there is no wrap-around, and sizes[1] = 0.
 
-    // Start writing at the current write position.
+   // Set start of first segment.
+   //retrieves the current value of the atomic variable write_pos in a thread-safe manner.
+   //memory_order_relaxed allows the operation to avoid unnecessary synchronization overhead. 
+   //This is sufficient here because the value of write_pos is only used locally and doesn't depend on updates from other threads.
+   //buf is a pointer to the beginning of the circular buffer array.
+   //Adding write_pos to buf advances the pointer to the position in the buffer where the next write operation should occur.
     p[0] = buf + write_pos.load(memory_order_relaxed);
 
     // Load the read position to determine available space, ensuring visibility across threads.
+   //memory_order_acquire ensures that any memory operations (writes to the buffer) performed by other threads before updating read_pos are visible to this thread after the load operation.
+   //Prevents reordering of subsequent reads with this load operation, ensuring the thread sees a consistent state of memory.
     const unsigned rpos = read_pos.load(memory_order_acquire);
 
     // Determine writable space in the buffer.
     if (rpos <= write_pos.load(memory_order_relaxed)) {
-        // Case 1: Buffer does not wrap around ("eeeeDDDDeeee").
+        // Case 1: Buffer does not wrap around ("eeeeDDDDeeee"). (e = empty, D = data)
         p[1] = buf;  // Second segment starts at the beginning of the buffer.
-        if (rpos) {
+        if (rpos) { //Checks if rpos != 0
             sizes[0] = size - write_pos.load(memory_order_relaxed); // Space until end of buffer.
-            sizes[1] = rpos - 1;  // Space before read position.
-        } else {
+            sizes[1] = rpos - 1;  // Space before read position. Reserve one slot.
+        } else { //Checks if rpos == 0, means the read_pos is at the start of the buffer (index 0), and there is no second writable segment before read_pos.
             sizes[0] = size - write_pos.load(memory_order_relaxed) - 1; // Reserve one slot.
             sizes[1] = 0; // No second segment needed.
         }
     } else {
         // Case 2: Buffer wraps around ("DDeeeeeeeDD").
         p[1] = nullptr; // No second segment used.
-        sizes[0] = rpos - write_pos.load(memory_order_relaxed) - 1; // Space before read position.
+        sizes[0] = rpos - write_pos.load(memory_order_relaxed) - 1; // Space before read position. Reserve one slot.
         sizes[1] = 0;
     }
 
     // Ensure we only write as much as the buffer can fit.
+   //buffer_size: The number of elements the user wants to write.
+   // By taking the minimum of buffer_size and sizes[0] + sizes[1], the function ensures:
+   //If there is enough space in the buffer, all buffer_size elements will be written.
+   //If the buffer is nearly full, only as much as possible (sizes[0] + sizes[1]) will be written.
     buffer_size = min(buffer_size, sizes[0] + sizes[1]);
 
     // Write data into the first segment.
+   //from_first: The number of elements to write to the first segment and is min of the two
+   //memcpy Copies from_first elements from the provided buffer into the first segment (p[0])
     const int from_first = min(buffer_size, sizes[0]);
     memcpy(p[0], buffer, from_first * sizeof(T));
 
     // If needed, write remaining data into the second segment.
+   //checks whether the data to be written (buffer_size) is larger than the space available in the first segment (sizes[0]).
+   /*
+   p[1]: Pointer to the second writable segment, typically at the start of the buffer (index 0).
+   buffer + from_first:
+   Skips over the portion of the input buffer already written to p[0].
+   from_first represents the number of elements written to p[0] (min(buffer_size, sizes[0])).
+   (buffer_size - sizes[0]):
+   Represents the number of elements remaining to be written after filling the first segment.
+   sizeof(T): Multiplies the number of remaining elements by the size of each element to calculate the total number of bytes to copy. 
+   */
     if (buffer_size > sizes[0]) {
         memcpy(p[1], buffer + from_first, (buffer_size - sizes[0]) * sizeof(T));
     }
