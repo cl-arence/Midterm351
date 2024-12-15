@@ -265,7 +265,8 @@ shared_mutex mapMutex;
 
 // socketInfoClass holds state information and controls synchronization for a socket descriptor.
 class socketInfoClass {
-    int totalWritten{0}; // Total bytes written to the socket (used for tracking data in myWrite).
+    int totalWritten{0}; // Total bytes written to the socket (used for tracking data in myWrite). 
+   //In reading it tracks the total amount of data currently available in the buffer (data written but not yet read).
     int maxTotalCanRead{0}; // Max bytes that can be read from the socket
 
     condition_variable cvDrain; // Condition variable for managing myTcdrain (waits until data is fully read).
@@ -284,3 +285,201 @@ public:
     // Constructor initializes the pair variable with the descriptor of the paired socket.Ensures each instance of Sockeinfoclass has a reference to its paired socket
     socketInfoClass(unsigned pairInit)
     : pair(pairInit)  { }
+
+// draining: Waits until all data written to the socket has been read (used by myTcdrain to ensure synch btw writer and reader).
+int draining(shared_lock<shared_mutex> &desInfoLk)
+{
+    // Acquire a unique lock on socketInfoMutex for exclusive access to this socket's state variables totalWritten and maxTotalCanRead.
+    //Since it accesses state vars and we need exclusive access to avoid conflicts with other threads 
+    unique_lock socketLk(socketInfoMutex);
+    
+    // Release the shared lock on mapMutex, allowing other threads to access desInfoMap.
+    desInfoLk.unlock();
+
+    // Check if the paired socket is open (pair >= 0) and if there is unread data (totalWritten > maxTotalCanRead).
+    // If both conditions are true, wait on cvDrain until notified by a reader.
+    if (0 <= pair && totalWritten > maxTotalCanRead)
+        cvDrain.wait(socketLk); // Waits until data is drained. Linux pthreads handle spurious wakeups.
+         // spurious wakeup?  Not a problem with Linux p-threads
+         // In the Solaris implementation of condition variables,
+         //    a spurious wakeup may occur without the condition being assigned
+         //    if the process is signaled; the wait system call aborts and
+         //    returns EINTR.[2] The Linux p-thread implementation of condition variables
+         //    guarantees that it will not do that.[3][4]
+         // https://en.wikipedia.org/wiki/Spurious_wakeup
+         //  cvDrain.wait(socketLk, [this]{return pair < 0 || totalWritten <= maxTotalCanRead;});
+
+    // Return 0 to indicate successful completion of the drain operation.
+    return 0;
+}
+
+/ writing: Writes data to the socket and updates the total amount of data written(totalWritten).
+//          Also notifies readers that new data is available.
+// writes nbyte bytes from buf to the socket represented by descriptor buf
+int writing(int des, const void* buf, size_t nbyte, shared_lock<shared_mutex> &desInfoLk)
+{
+    // Lock the socketInfoMutex for exclusive access to this socket's state.
+    lock_guard socketLk(socketInfoMutex);
+    
+    // Release the shared lock on mapMutex, allowing other threads to access desInfoMap.
+    desInfoLk.unlock();
+
+    // Writing data to the socket: writes to a circular buffer 
+    int written = circBuffer.write((const char*) buf, nbyte); // Write to circular buffer.
+
+    // If data was successfully written (written > 0), update totalWritten and notify readers.
+    if (written > 0) {
+        totalWritten += written;     // Update totalWritten to reflect the new data sent.
+        cvRead.notify_one();         // Notify one waiting reader that data is available.
+    }
+
+    // Return the number of bytes written to indicate success or failure to the caller.
+    return written;
+}
+
+// reading: Reads data from a socket and manages synchronization, timeouts, and thread safety with the writer.
+// handles cases like connection state, timeouts and synch with writing and draining 
+//          Waits for sufficient data (`totalWritten >= min`) or socket closure (`pair < 0`) before proceeding.
+
+//reads n bytes from the socket identified by des into buf
+//min: Minimum number of bytes required before returning.
+//time and timeout: Conditions for blocking behavior, but only immediate timeout (0) is supported.
+//desInfoLk: A reference to a shared lock on mapMutex, which ensures safe access to desInfoMap
+int reading(int des, void *buf, int n, int min, int time, int timeout, shared_lock<shared_mutex> &desInfoLk) {
+    // Acquire a unique lock on socketInfoMutex for exclusive access to socket state.
+    unique_lock socketLk(socketInfoMutex);
+    
+    // Release the shared lock on mapMutex, allowing other threads to access desInfoMap.
+    desInfoLk.unlock();
+
+    // Check if there is sufficient data to read or if the paired socket is open.
+   //maxTotalCanRead: Tracks the maximum bytes the reader can read in a single operation. If non-zero, reading proceeds.
+    if (maxTotalCanRead || (totalWritten < min && -2 != pair)) {
+        // Allow up to `n` more bytes to be read in this operation. Signals to writers how much data it can read so they can add more if needed
+        maxTotalCanRead += n;
+
+        // Notify all writers waiting on `cvDrain` that the reader is ready for more data.
+        cvDrain.notify_all();
+
+        // Handle different timeout configurations.
+        if (0 == time && 0 == timeout) {
+            // No timeout: Wait until sufficient data is available(totalWritten >= min) or the paired socket is closed(0 > pair).
+            cvRead.wait(socketLk, [this, min] {
+                return totalWritten >= min || 0 > pair;
+            });
+        } else if (0 != time && 0 != timeout) {
+            // Wait with a timeout: Wait for the specified timeout duration.
+           //timeout: Specifies the total time to wait for data.
+           //time: Interval between checks for data availability.
+          //The reader waits for notifications but exits early if the timeout expires
+            if (cv_status::timeout != cvRead.wait_for(socketLk, duration<int, deci>{timeout})) {
+                // Periodically check if the required data is available or the socket is closed.
+                while (totalWritten < min && 0 <= pair) {
+                    if (cv_status::timeout == cvRead.wait_for(socketLk, duration<int, deci>{time})) {
+                        break; // Exit loop if timeout occurs.
+                    }
+                }
+            }
+        } else {
+            // Unsupported timeout configuration: Exit with an error.
+            cout << "Currently not supporting this configuration of time and timeout." << endl;
+            exit(EXIT_FAILURE);
+        }
+
+        // Adjust `maxTotalCanRead` back to its original value after the read operation.
+        maxTotalCanRead -= n;
+    }
+
+    // Perform the read operation.
+    int bytesRead = circBuffer.read((char *)buf, n); // Read data into the buffer.
+    totalWritten -= bytesRead; // Decrease `totalWritten` by the number of bytes read.
+
+    // Notify writers if enough data has been drained.
+    if (totalWritten <= maxTotalCanRead) {
+        int errnoHold{errno}; // Preserve errno during notification.
+        cvDrain.notify_all(); // Notify all waiting writers.
+        errno = errnoHold;
+    }
+
+    // Notify readers if more data is available or the paired socket is closed.
+    if (0 < totalWritten || -2 == pair) {
+        int errnoHold{errno}; // Preserve errno during notification.
+        cvRead.notify_one(); // Notify one waiting reader.
+        errno = errnoHold;
+    }
+
+    // Return the number of bytes read.
+    return bytesRead;
+}
+
+// closing: Safely closes a socket rep by des and synchronizes with the paired socket to avoid race conditions.
+//          Notifies any threads waiting on reads or writes to let them know the socket is closed.
+int closing(int des)
+{
+    // mapMutex is already locked when calling this function, so no other myClose (or mySocketpair) can proceed.
+
+    // Check if the paired socket has already been closed.
+    if (pair != -2) { // Only proceed if the paired socket is still open. Since no need to close if its already closed 
+
+        // Get the socketInfoClass instance of the paired socket from desInfoMap.
+        //Retrieves the shared_ptr for the paired socket’s socketInfoClass from desInfoMap
+        socketInfoClassSp des_pair{desInfoMap[pair]};
+
+        // Lock both this socket’s mutex and the paired socket’s mutex to avoid race conditions.
+        //Uses scoped_lock to lock both socketInfoMutex (for the current socket) and des_pair->socketInfoMutex (for the paired socket).
+        scoped_lock guard(socketInfoMutex, des_pair->socketInfoMutex);
+
+        pair = -1;            // Mark this socket as the first of the pair to close.
+        des_pair->pair = -2;  // Mark the paired socket as the second to close.
+
+        //Checks if totalWritten > maxTotalCanRead, meaning there’s data that hasn’t yet been read from this socket.
+        if (totalWritten > maxTotalCanRead) {
+            // Notify any threads waiting on myTcdrain that the socket is closing,
+            // since this will discard any unread buffered data.
+            cvDrain.notify_all();
+        }
+
+        //Checks if des_pair->maxTotalCanRead > 0, which would mean there’s a thread potentially waiting on a read from the paired socket.
+        if (des_pair->maxTotalCanRead > 0) {
+            // Notify any thread waiting on reading from the paired socket.
+            // This signals that no more data will be written since this socket is closed and this is because: 
+            //The reader thread that’s waiting on cvRead will wake up and check the socket state (such as pair < 0).
+            //By examining pair, the reader can determine if the socket has been closed.
+            des_pair->cvRead.notify_one();
+        }
+    }
+
+    // Use the system's close function to close the socket descriptor.
+     return 0;
+   } // .closing()
+  }; // socketInfoClass
+} // unnamed namespace
+
+// myReadcond: Attempts to read data from a socket with specific conditions,
+//             such as requiring a minimum number of bytes before returning.
+//            Uses mapMutex and desInfoMap to locate socket info and calls the reading method if socket info is available 
+int myReadcond(int des, void * buf, int n, int min, int time, int timeout) {
+//des: The socket descriptor to read from.
+//buf: A pointer to the buffer where the data will be stored.
+//n: The number of bytes to read.
+//min: The minimum number of bytes required to complete the read operation.
+//time and timeout: Timing parameters for the read operation.
+    
+    // Acquire a shared lock on mapMutex to safely access desInfoMap
+    //It is not unlocked as it will release the lock when it goes out of scope 
+    shared_lock desInfoLk(mapMutex);
+
+    // Calls get_or to retrieve the shared_ptr to the socketInfoClass associated with the socket descriptor des from desInfoMap.
+    // If des is not found in desInfoMap, returns nullptr.
+    auto desInfoP{get_or(desInfoMap, des, nullptr)}; // make a local shared pointer
+
+    if (!desInfoP) {
+      // If desInfoP is nullptr (socket not found in desInfoMap),
+      // not an open "socket" [created with mySocketpair()]
+      errno = EBADF; return -1;
+   }
+   // If socket information is found in desInfoMap (desInfoP is valid),
+    // call the reading method to perform a conditional read and pass the parameters as seen in the brackets.
+ 	return desInfoP->reading(des, buf, n, min, time, timeout, desInfoLk);
+}
+
