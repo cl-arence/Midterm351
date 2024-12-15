@@ -483,3 +483,152 @@ int myReadcond(int des, void * buf, int n, int min, int time, int timeout) {
  	return desInfoP->reading(des, buf, n, min, time, timeout, desInfoLk);
 }
 
+// myWrite: Attempts to write data to a socket, checking if it is part of a socket pair
+//using desInfoMap to check the socket’s state and synchronize with the paired socket if it exists.
+//It defaults to a standard write if the socket is not managed by mySocketpair
+//or if the paired socket is closed.
+//attempts to write nbyte bytes from buf to the socket descriptor des.
+ssize_t myWrite(int des, const void* buf, size_t nbyte) {
+    {
+        // Acquire a shared lock on mapMutex to safely access desInfoMap.
+        shared_lock desInfoLk(mapMutex);
+
+        // Call get-or to retrieve the shared pointer to the socket's state from desInfoMap.
+        // If the socket descriptor is not in desInfoMap, desInfoP will be nullptr.
+        auto desInfoP{get_or(desInfoMap, des, nullptr)};
+        
+        // If socket information is found in desInfoMap (desInfoP is valid),
+        if (desInfoP) {
+            // Retrieve the paired socket descriptor's value from the socket's state information.
+            auto pair{desInfoP->pair};
+
+            // If the paired socket is still open (pair is not -2), attempt a synchronized write
+            // using the writing function of the paired socket.
+            if (-2 != pair)
+                     return desInfoMap[pair]->writing(des, buf, nbyte, desInfoLk);
+                  else {
+                // If the paired socket is closed,
+                // Set the global error number (errno) to EPIPE, which stands for "Broken Pipe".
+                //This error occurs when the writer attempts to write to a socket or pipe where the paired endpoint has been closed.
+                //-1 indicates the failure of the myWrite operation.
+                     errno = EPIPE; return -1;
+                  }
+               }
+            //If the socket is not found in desInfoMap (i.e., desInfoP == nullptr).
+            //This means the socket descriptor (des) is either invalid or not managed by mySocketpair.
+            //Sets errno to EBADF, which stands for "Bad File Descriptor".
+               errno = EBADF; return -1;
+    }
+
+// myTcdrain: Ensures that all written data has been fully transmitted from the buffer associated with
+//            the socket descriptor `des`. If `des` is part of a socket pair, it calls draining function 
+//            on the paired socket to synch the drain operation
+// It falls back to standard system tcdrain function if the socket isnt in a pair. 
+int myTcdrain(int des) {
+    {
+        // Acquire a shared lock on mapMutex to safely access desInfoMap.
+        shared_lock desInfoLk(mapMutex);
+
+        // Call get-or to retrieve the shared pointer to the socket's state information from desInfoMap.
+        // If the socket descriptor is not in desInfoMap, desInfoP will be nullptr.
+        auto desInfoP{get_or(desInfoMap, des, nullptr)};
+
+        // If socket information is found in desInfoMap (desInfoP is valid),
+        if (desInfoP) {
+            // Retrieve the paired socket descriptor from the socket's state information.
+            auto pair{desInfoP->pair};
+
+            // If the paired descriptor is closed (pair is -2), no draining is needed, so return 0.
+            if (-2 == pair)
+                return 0;
+            else {
+                // If the paired socket is still open, create a shared pointer to its state information
+                //ie. retrieve the state information of a socket, which is stored in a shared_ptr<socketInfoClass> in desInfoMap
+                // and call draining to synchronize the drain operation on this paired socket.
+                auto desPairInfoSp{desInfoMap[pair]};
+                return desPairInfoSp->draining(desInfoLk);
+            }
+    }
+      //If the socket is not found in desInfoMap (i.e., desInfoP == nullptr).
+            //This means the socket descriptor (des) is either invalid or not managed by mySocketpair.
+            //Sets errno to EBADF, which stands for "Bad File Descriptor".
+   errno = EBADF; return -1;
+}
+
+/* mysocketpair:
+ * Creates a custom socket pair and initializes their state for bidirectional communication.
+ * This function mimics the behavior of the standard `socketpair` system call and is a wrapper around it.
+ * 
+ * Parameters:
+ * - des[2]: An array where the two socket descriptors (endpoints) will be stored.
+ * 
+ * Key Operations:
+ * 1. Assigns fixed descriptors (`des[0] = 3`, `des[1] = 4`) for the socket pair.
+ * 2. Associates each descriptor with its pair using `desInfoMap`, a global map for socket management.
+ * 3. Initializes the state of each socket (using `socketInfoClass`), which includes:
+ *    - Tracking the paired socket.
+ *    - Synchronization primitives like mutexes and condition variables for thread-safe communication.
+ * 4. Ensures thread safety when accessing `desInfoMap` using a global lock (`mapMutex`).
+ * 
+ * Returns:
+ * - 0 on success, indicating the socket pair was successfully created.
+ */
+int mySocketpair(int domain, int type, int protocol, int des[2]) {
+    // Lock the global map `desInfoMap` to ensure thread-safe access.
+    lock_guard desInfoLk(mapMutex);
+
+    // Assign fixed values to the two descriptors of the socket pair to be placeholders for testing.
+    des[0] = 3; // Endpoint 1 of the socket pair.
+    des[1] = 4; // Endpoint 2 of the socket pair.
+   
+        //Then create a shared_ptr<socketInfoClass> for des[0], initialized with des[1] as its paired socket descriptor since:
+        //make_shared creates a shared_ptr to a new socketInfoClass object and;
+        //socketInfoClass(des[1]) constructs the new socketInfoClass instance with des[1] as the pair, establishing that des[0] is paired with des[1].
+        //LHS stores this shared_ptr in desInfoMap under the key des[0], allowing access to the state of socket des[0] through desInfoMap
+    desInfoMap[des[0]] = make_shared<socketInfoClass>(des[1]);
+
+    //  Now do the same and store state information for socket des[1], with des[0] as its paired socket descriptor.
+    desInfoMap[des[1]] = make_shared<socketInfoClass>(des[0]);
+
+    // Return success.
+    return 0;
+}
+
+/* myClose:
+ * Closes a custom-managed socket and removes its state from `desInfoMap`.
+ * Mimics the behavior of the standard `close` system call.
+ *
+ * Parameters:
+ * - des: The socket descriptor to close.
+ *
+ * Key Steps:
+ * 1. Ensures thread-safe access to `desInfoMap` using a lock.
+ * 2. Checks if the descriptor exists in `desInfoMap`:
+ *    - If found: Removes the descriptor and calls the `closing` method.
+ *    - If not found: Returns `-1` and sets `errno` to `EBADF`.
+ * 
+ * Returns:
+ * - 0 on successful closure.
+ * - -1 if the descriptor is invalid (sets `errno = EBADF`).
+ */
+int myClose(int des) {
+    // Lock the global map `desInfoMap` for thread-safe access.
+    lock_guard desInfoLk(mapMutex);
+
+    // Search for the descriptor in `desInfoMap`.
+    auto iter{desInfoMap.find(des)};
+
+    // If the descriptor exists in the map:
+    if (iter != desInfoMap.end()) {
+        // Remove the descriptor from the map.
+        desInfoMap.erase(iter);
+
+        // Call the `closing` method for cleanup and return its result.
+        return iter->second->closing(des);
+    }
+
+    // If the descriptor does not exist, set `errno` and return failure.
+    errno = EBADF; // Bad file descriptor.
+    return -1;
+}
+
