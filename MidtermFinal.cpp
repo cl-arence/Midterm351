@@ -61,6 +61,7 @@ class CircBuf {
 // - Reader consumes data from `read_pos`, then advances it atomically.
 
 public:
+
 /* 
  * Writes up to `buffer_size` elements from the provided `buffer` into the circular buffer.
  * Advances the `write_pos` pointer after writing.
@@ -101,7 +102,11 @@ unsigned write(const T *buffer, unsigned buffer_size) {
 
     // Determine writable space in the buffer.
     if (rpos <= write_pos.load(memory_order_relaxed)) {
-        // Case 1: Buffer does not wrap around ("eeeeDDDDeeee"). (e = empty, D = data)
+        // Case 1: Buffer wraps around ("eeeeDDDDeeee"). (e = empty, D = data)
+        //  Index:  0   1   2   3   4   5   6   7   8   9
+       //Content:   p1  p1  D   D   D   D   p0  p0  p0  p0
+          //              ^read_pos             ^write_pos
+
         p[1] = buf;  // Second segment starts at the beginning of the buffer.
         if (rpos) { //Checks if rpos != 0
             sizes[0] = size - write_pos.load(memory_order_relaxed); // Space until end of buffer.
@@ -111,7 +116,11 @@ unsigned write(const T *buffer, unsigned buffer_size) {
             sizes[1] = 0; // No second segment needed.
         }
     } else {
-        // Case 2: Buffer wraps around ("DDeeeeeeeDD").
+        // Case 2: Buffer does not wrap around ("DDeeeeeeeDD").
+      //Index:      0   1   2   3   4   5   6   7   8   9
+       //Content:   D   D   p0  p0  p0  p0  p0  p0  D   D
+           //          ^write_pos                 ^read_pos
+
         p[1] = nullptr; // No second segment used.
         sizes[0] = rpos - write_pos.load(memory_order_relaxed) - 1; // Space before read position. Reserve one slot.
         sizes[1] = 0;
@@ -131,26 +140,147 @@ unsigned write(const T *buffer, unsigned buffer_size) {
     memcpy(p[0], buffer, from_first * sizeof(T));
 
     // If needed, write remaining data into the second segment.
-   //checks whether the data to be written (buffer_size) is larger than the space available in the first segment (sizes[0]).
+   //the if condition checks whether the data to be written (buffer_size) is larger than the space available in the first segment (sizes[0]).
    /*
-   p[1]: Pointer to the second writable segment, typically at the start of the buffer (index 0).
-   buffer + from_first:
+   --p[1]: Pointer to the second writable segment, typically at the start of the buffer (index 0).
+   --buffer + from_first implements the below actions:
    Skips over the portion of the input buffer already written to p[0].
    from_first represents the number of elements written to p[0] (min(buffer_size, sizes[0])).
-   (buffer_size - sizes[0]):
+   --(buffer_size - sizes[0]) implements the below actions:
    Represents the number of elements remaining to be written after filling the first segment.
-   sizeof(T): Multiplies the number of remaining elements by the size of each element to calculate the total number of bytes to copy. 
+   --sizeof(T): Multiplies the number of remaining elements by the size of each element to calculate the total number of bytes to copy. 
    */
     if (buffer_size > sizes[0]) {
         memcpy(p[1], buffer + from_first, (buffer_size - sizes[0]) * sizeof(T));
     }
 
-    // Update the write position, wrapping around if necessary.
+    // Update the write pointer (write_pos) in the circular buffer after successfully writing data, wrapping around if necessary.
+   // % size ensures that write_pos wraps around to the beginning of the buffer when it reaches the end.
+   //The circular buffer is implemented as a fixed-size array (buf[size]), so this modulo operation prevents out-of-bounds access.
     write_pos.store((write_pos.load(memory_order_relaxed) + buffer_size) % size, memory_order_release);
 
     // Return the number of elements written.
     return buffer_size;
 }
 
+/* 
+ * Reads up to `buffer_size` elements from the circular buffer into the provided `buffer`.
+ * Advances the read pointer (`read_pos`) to reflect the consumed data.
+ * 
+ * Key Features:
+ * 1. Determines the available data based on `write_pos` and `read_pos`.
+ * 2. Handles both contiguous and wrap-around scenarios:
+ *    - Contiguous Data: Data lies in a single segment (`p[0]`).
+ *    - Wrap-Around: Data spans two segments (`p[0]` and `p[1]`).
+ * 3. Ensures thread-safe access with atomic operations.
+ * 
+ * Returns:
+ * - The number of elements successfully read from the buffer.
+ */
+unsigned read(T *buffer, unsigned buffer_size) {
+    T *p[2];         // Pointers to data segments where data will be read from.
+    unsigned sizes[2]; // Sizes of the data segments corresponding to `p[0]` and `p[1]`.
 
+    // Initialize the first segment, starting at the current `read_pos`.
+    p[0] = buf + read_pos.load(memory_order_relaxed);
 
+    // Load the current `write_pos` to calculate available data for reading.
+    const unsigned wpos = write_pos.load(memory_order_acquire);
+
+    // Determine the layout of data in the buffer.
+    if (read_pos.load(memory_order_relaxed) <= wpos) {
+        // Case 1: No Wrap-Around
+        // Data is contiguous from `read_pos` to `wpos`.
+        // Index:    0   1   2   3   4   5   6   7   8   9
+        //Content:   e   e   D   D   D   D   e   e   e   e
+      //                   ^read_pos             ^write_pos
+        p[1] = nullptr;             // No second segment.
+        sizes[0] = wpos - read_pos.load(memory_order_relaxed); // Size of the first segment.
+        sizes[1] = 0;               // No data in the second segment.
+    } else {
+        // Case 2: Wrap-Around
+        // Data wraps around the end of the buffer.
+        // Index:   0   1   2   3   4   5   6   7   8   9
+       //Content:   D   D   e   e   e   e   e   e   D   D
+        //            ^write_pos                 ^read_pos
+        p[1] = buf;                 // Second segment starts at the beginning of the buffer.
+        sizes[0] = size - read_pos.load(memory_order_relaxed); // Data from `read_pos` to end of buffer.
+        sizes[1] = wpos;            // Data from start of buffer to `wpos`.
+    }
+
+    // Limit the amount of data to read to the total available data.
+    buffer_size = min(buffer_size, sizes[0] + sizes[1]);
+
+    // Step 1: Read from the first segment.
+    const int from_first = min(buffer_size, sizes[0]); // Number of elements to read from `p[0]`.
+    memcpy(buffer, p[0], from_first * sizeof(T));       // Copy data to the provided buffer.
+
+    // Step 2: Read from the second segment, if needed.
+    if (buffer_size > sizes[0]) {
+        memcpy(buffer + from_first, p[1], (buffer_size - sizes[0]) * sizeof(T)); // Copy remaining data.
+    }
+
+    // Update the `read_pos` pointer after reading.
+    // Wraps around using `% size` to stay within the circular buffer bounds.
+    read_pos.store((read_pos.load(memory_order_relaxed) + buffer_size) % size, memory_order_release);
+
+    // Return the actual number of elements read.
+    return buffer_size;
+}
+};
+
+// Template function to retrieve a value for a key in a map or return a default if the key is not found.
+// Useful for safely accessing socket descriptor information in desInfoMap.
+template <typename Key, typename Value, typename T>
+Value get_or(std::map<Key, Value>& m, const Key& key, T&& default_value)
+{
+    // Find the key in the map. If found, "it" points to the key-value pair; otherwise, "it" is m.end().
+    auto it{m.find(key)};
+    
+    // Check if key is absent (it == m.end()). If absent, return the provided default value.
+    if (m.end() == it) {
+        return default_value;
+    }
+    
+    // If key is found, return the corresponding value.
+    return it->second;
+}
+
+namespace{ //Unnamed (anonymous) namespace
+
+// socketInfoClass: Stores information and synchronization controls for each socket in a socket pair. Below is the declaration
+class socketInfoClass;
+
+typedef shared_ptr<socketInfoClass> socketInfoClassSp; // Defines an alias(ie a shorthand) for a shared pointer to socketInfoClass.
+
+map<int, socketInfoClassSp> desInfoMap; // Defines a map that maps each socket descriptor (int key) to a shared_ptr of socketInfoClass, holding its state.
+
+// A shared mutex to protect desInfoMap, ensuring that only one thread can modify it at a time.
+// Allows multiple threads to hold shared (read) locks or one exclusive (write) lock for thread safety.
+    //   Protects desInfoMap so only a single thread can modify the map
+    //  at a time.  This also means that only one call to functions like mySocketpair() or
+    //  myClose() can make progress at a time.  This shared mutex is also used to prevent a
+    //  paired socket from being closed at the beginning of a myWrite or myTcdrain function.
+shared_mutex mapMutex;
+
+// socketInfoClass holds state information and controls synchronization for a socket descriptor.
+class socketInfoClass {
+    int totalWritten{0}; // Total bytes written to the socket (used for tracking data in myWrite).
+    int maxTotalCanRead{0}; // Max bytes that can be read from the socket
+
+    condition_variable cvDrain; // Condition variable for managing myTcdrain (waits until data is fully read).
+    condition_variable cvRead; // Condition variable for notifying when data is available to be read. Used by myreadcond()
+
+    CircBuf<char> circBuffer; // Circular buffer for data storage.
+
+    mutex socketInfoMutex; // Mutex to ensure thread-safe access to this socket's state (like totalWritten).
+
+public:
+    int pair; // Descriptor of paired socket; set to -1 if this socket descriptor is closed, -2 if paired socket(descriptor) is closed.
+//pair allows mywrite and mytcdrain to reference a paired socket, ensuring operations on one socket are synchronized with its pair
+//If pair == -2, it means the paired socket has been closed.
+//If pair >= 0, it’s a valid socket descriptor representing the other end of the socket pair.
+
+    // Constructor initializes the pair variable with the descriptor of the paired socket.Ensures each instance of Sockeinfoclass has a reference to its paired socket
+    socketInfoClass(unsigned pairInit)
+    : pair(pairInit)  { }
