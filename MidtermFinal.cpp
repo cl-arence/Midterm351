@@ -632,3 +632,58 @@ int myClose(int des) {
     return -1;
 }
 
+/*
+ * Main function to set up real-time scheduling, create a socket pair,
+ * and test inter-thread communication using custom sockets.
+ */
+int main() {
+    // Configure CPU affinity to restrict the main thread to core 0.
+    cpu_set_t cpu_set;
+    CPU_ZERO(&cpu_set);
+    CPU_SET(0, &cpu_set);
+
+    // Set the thread name for debugging.
+    const char* threadName = "Pri";
+    pthread_setname_np(pthread_self(), threadName);
+
+    // Apply CPU affinity for the main thread.
+    sched_setaffinity(0, sizeof(cpu_set), &cpu_set);
+
+    try {
+        // Set real-time scheduling policy and priority (SCHED_FIFO, priority 60).
+        sched_param sch;
+        sch.__sched_priority = 60;
+        pthreadSupport::setSchedParam(SCHED_FIFO, sch);
+
+        // Create a socket pair for inter-thread communication.
+        mySocketpair(AF_LOCAL, SOCK_STREAM, 0, daSktPr);
+
+        // Write initial data to the socket.
+        myWrite(daSktPr[0], "abc", 3);
+
+        // Create a new thread (`coutThreadFunc`) with lower priority (50).
+        pthreadSupport::posixThread coutThread(SCHED_FIFO, 50, coutThreadFunc);
+
+        // Wait for data transmission to complete on `daSktPr[0]`.
+        myTcdrain(daSktPr[0]);
+
+        // Write and read data from the socket.
+        myWrite(daSktPr[0], "123", 4);
+        myReadcond(daSktPr[0], B2, 4, 4, 0, 0);
+
+        // Lower the main thread’s priority to 40.
+        pthreadSupport::setSchedPrio(40);
+
+        // Close the socket, signaling the end of communication.
+        myClose(daSktPr[0]);
+
+        // Wait for `coutThreadFunc` to complete.
+        coutThread.join();
+        return 0;
+    }
+    catch (system_error& error) {
+        // Handle system-level exceptions.
+        cout << "Error: " << error.code() << " - " << error.what() << '\n';
+    }
+    catch (...) { throw; }
+}
