@@ -461,7 +461,8 @@ int closing(int des)
 int myReadcond(int des, void * buf, int n, int min, int time, int timeout) {
 //des: The socket descriptor to read from.
 //buf: A pointer to the buffer where the data will be stored.
-//n: The number of bytes to read.
+//n: Represents the size of the user’s buffer (buf) and the upper limit of how much data the function can read.
+//Even if more than n bytes are available in the socket buffer, myReadcond will not read more than n bytes.
 //min: The minimum number of bytes required to complete the read operation.
 //time and timeout: Timing parameters for the read operation.
     
@@ -522,8 +523,7 @@ ssize_t myWrite(int des, const void* buf, size_t nbyte) {
 
 // myTcdrain: Ensures that all written data has been fully transmitted from the buffer associated with
 //            the socket descriptor `des`. If `des` is part of a socket pair, it calls draining function 
-//            on the paired socket to synch the drain operation
-// It falls back to standard system tcdrain function if the socket isnt in a pair. 
+//            on the paired socket to synch the drain operation 
 int myTcdrain(int des) {
     {
         // Acquire a shared lock on mapMutex to safely access desInfoMap.
@@ -637,22 +637,27 @@ int myClose(int des) {
  * and test inter-thread communication using custom sockets.
  */
 int main() {
-    // Configure CPU affinity to restrict the main thread to core 0.
-    cpu_set_t cpu_set;
-    CPU_ZERO(&cpu_set);
-    CPU_SET(0, &cpu_set);
-
-    // Set the thread name for debugging.
+   // Configure CPU affinity to limit execution to CPU 0 to 
+    //ensure consistent thread behavior by running all threads on the same CPU,
+   //Restricts the execution of the thread to a specific CPU core (core 0).
+   //Improves predictability by avoiding thread migrations across cores.
+   //Useful in real-time systems where timing and processor locality are critical.
+    cpu_set_t cpu_set;                // Define a CPU set.
+    CPU_ZERO(&cpu_set);               // Clear the CPU set.
+    CPU_SET(myCpu, &cpu_set);         // Specify CPU 0 and add CPU 0 to the set.
+   
+    //Set the name of the primary thread to Pri for debugging/logging.
     const char* threadName = "Pri";
     pthread_setname_np(pthread_self(), threadName);
 
-    // Apply CPU affinity for the main thread.
-    sched_setaffinity(0, sizeof(cpu_set), &cpu_set);
-
+   // Apply the CPU affinity to the current thread and its children to ensure they all run at CPU 0. 
+    PE(sched_setaffinity(0, sizeof(cpu_set), &cpu_set));
+       
+    //try block for exception handling   
     try {
-        // Set real-time scheduling policy and priority (SCHED_FIFO, priority 60).
-        sched_param sch;
-        sch.__sched_priority = 60;
+        // Set primary thread's real-time scheduling policy and priority (SCHED_FIFO, priority 60).
+        sched_param sch; // Structure to store scheduling parameters.
+        sch.__sched_priority = 60; 
         pthreadSupport::setSchedParam(SCHED_FIFO, sch);
 
         // Create a socket pair for inter-thread communication.
@@ -664,11 +669,16 @@ int main() {
         // Create a new thread (`coutThreadFunc`) with lower priority (50).
         pthreadSupport::posixThread coutThread(SCHED_FIFO, 50, coutThreadFunc);
 
-        // Wait for data transmission to complete on `daSktPr[0]`.
+        // call mytcdrain to wait for data transmission to complete on `daSktPr[0]`.
+       //Checks the buffer associated with des to ensure no pending data remains to be transmitted.
+       //Blocks the calling thread until: All data has been written to the paired socket or underlying system buffer.
+       //and the paired socket has acknowledged or synchronized the drain.
         myTcdrain(daSktPr[0]);
 
         // Write and read data from the socket.
-        myWrite(daSktPr[0], "123", 4);
+        myWrite(daSktPr[0], "123", 4); //Since size is 4, we have a NULL character
+       
+       //call myReadCond to read a max of 4 bytes if a min of 4 bytes are avialable in the buffer
         myReadcond(daSktPr[0], B2, 4, 4, 0, 0);
 
         // Lower the main thread’s priority to 40.
@@ -678,12 +688,101 @@ int main() {
         myClose(daSktPr[0]);
 
         // Wait for `coutThreadFunc` to complete.
+        //oin() makes Pri wait for the thread running coutThreadFunc to finish execution before continuing hence, 
+        //the main thread blocks at this point, ensuring the other one completes its work before the main program proceeds.
         coutThread.join();
         return 0;
     }
+       
+      // Then finally catch block to handle system errors, log the error details, and return the error code.
     catch (system_error& error) {
         // Handle system-level exceptions.
         cout << "Error: " << error.code() << " - " << error.what() << '\n';
     }
+       // Re-throw any other exceptions for debugging purposes.
     catch (...) { throw; }
+}
+
+// Define buffer size for reading and writing operations.
+static const int BSize = 20; 
+
+// Buffers to store data for read operations, initialized to zero (NUL characters).
+static char B[BSize];  // Primary buffer for data read operations.
+static char B2[BSize]; // Secondary buffer for additional testing.
+
+// Socket pair descriptors for inter-thread communication.
+static int daSktPr[2];
+
+// Function to test reading and writing using circular buffers and custom socket operations.
+void coutThreadFunc(void) {
+    int RetVal; // Variable to store return values from read and write operations.
+
+    // Initialize a circular buffer for testing.
+    CircBuf<char> buffer;
+
+    // Write data to the circular buffer.
+    buffer.write("123456789", 10); // Write 10 bytes (including a NUL character for termination).
+
+    // Read data from the circular buffer into the primary buffer `B`.
+    RetVal = buffer.read(B, BSize);
+    // Output the number of bytes read and the contents of `B`.
+    cout << "Output Line 1 - RetVal: " << RetVal << "  B: " << B << endl;
+
+    // Attempt to read from the socket with a minimum byte requirement and timeout.
+    cout << "The next line will timeout in 5 or so seconds (50 deciseconds)" << endl;
+    RetVal = myReadcond(daSktPr[1], B, BSize, 10, 50, 50); // Requires 10 bytes, waits up to 5 seconds.
+
+    // Output the results of the read attempt.
+    cout << "Output Line 2 - RetVal: " << RetVal << "  B: " << B << endl;
+
+    // Write data to the socket `daSktPr[1]` for subsequent reading.
+    myWrite(daSktPr[1], "wxyz", 5); // Write 5 bytes ("wxyz").
+
+    // Write more data to the socket `daSktPr[0]` for testing cross-socket communication.
+    myWrite(daSktPr[0], "ab", 3); // Write 3 bytes ("ab").
+
+    // Read 5 bytes from `daSktPr[1]` into `B`, blocking if insufficient data.
+    RetVal = myReadcond(daSktPr[1], B, BSize, 5, 0, 0); // Requires exactly 5 bytes, no timeout.
+
+    // Output the results of the read operation, handling potential errors.
+    cout << "Output Line 3 - RetVal: " << RetVal;
+    if (RetVal == -1)
+        cout << " Error:  " << strerror(errno); // Output error if `myReadcond` fails.
+    else if (RetVal > 0)
+        cout << "  B: " << B; // Output data if the read succeeds.
+    cout << endl;
+
+    // Perform another read operation with the same parameters.
+    RetVal = myReadcond(daSktPr[1], B, BSize, 5, 0, 0);
+    cout << "Output Line 4 - RetVal: " << RetVal;
+    if (RetVal == -1)
+        cout << " Error:  " << strerror(errno); // Output error if the read fails.
+    else if (RetVal > 0)
+        cout << "  B: " << B; // Output data if the read succeeds.
+    cout << endl;
+
+    // Attempt a third read operation, repeating the logic above.
+    RetVal = myReadcond(daSktPr[1], B, BSize, 5, 0, 0);
+    cout << "Output Line 4b- RetVal: " << RetVal;
+    if (RetVal == -1)
+        cout << " Error:  " << strerror(errno); // Output error if the read fails.
+    else if (RetVal > 0)
+        cout << "  B: " << B; // Output data if the read succeeds.
+    cout << endl;
+
+    // Write 10 bytes ("123456789") to `daSktPr[1]` and output the results.
+    RetVal = myWrite(daSktPr[1], "123456789", 10); // Write 10 bytes.
+    cout << "Output Line 5-1 - RetVal: " << RetVal;
+    if (RetVal == -1)
+        cout << " Error:  " << strerror(errno) << endl; // Output error if the write fails.
+    else
+        cout << endl;
+
+    // Write 10 bytes ("123456789") to `daSktPr[0]` and output the results.
+    RetVal = myWrite(daSktPr[0], "123456789", 10); // Write 10 bytes.
+    cout << "Output Line 5-0 - RetVal: " << RetVal;
+    if (RetVal == -1)
+        cout << " Error:  " << strerror(errno) << endl; // Output error if the write fails.
+    else
+        cout << endl;
 }
