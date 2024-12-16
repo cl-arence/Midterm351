@@ -1,43 +1,42 @@
 /*
- * Context Object: ctx
+ * Context Object: ctx (SenderY)
  *
  * Description:
- * - `ctx` is an instance of the `ReceiverY` class, managing the receiver's state and interactions during
+ * - `ctx` is an instance of the `SenderY` class, managing the sender's state and interactions during
  *   the YMODEM protocol. It inherits common functionality from the `PeerY` base class.
- * - Provides methods and variables for session control, synchronization, block validation, and communication.
+ * - Provides methods and variables for session control, synchronization, block transmission, and file management.
  *
  * Key Variables in `ctx`:
- * - `goodBlk` (bool): Indicates if the last block received is valid.
- * - `goodBlk1st` (bool): True if the current block is the first valid copy of a new block.
- * - `syncLoss` (bool): True if a fatal synchronization loss has occurred.
- * - `closeProb` (int): Indicates file closure status:
- *      0 = no problem, -1 = file not yet closed, positive = error code.
- * - `errCnt` (int): Counts errors or retries (e.g., repeated blocks, timeouts, excessive NAKs).
- * - `NCGbyte` (uint8_t): The initial control byte sent to synchronize with the sender, typically `'C'`.
- * - `KbCan` (bool): True if a keyboard cancel command (`KB_C`) has been issued.
- * - `anotherFile` (bool): True if another file exists in the batch transfer.
- * - `transferringFileD` (int): Descriptor for the file currently being received (-1 if no file is open).
- * - `result` (std::string): Logs the result or status of the session (e.g., "Done", "Cancelled").
+ * - **Receiver and Sender Variables:**
+ *   - `goodBlk` (bool): Indicates if the last block received (or sent) is valid.
+ *   - `goodBlk1st` (bool): True if the current block is the first valid copy of a new block.
+ *   - `syncLoss` (bool): True if a fatal synchronization loss has occurred.
+ *   - `closeProb` (int): Indicates file closure status:
+ *        0 = no problem, -1 = file not yet closed, positive = error code.
+ *   - `errCnt` (int): Tracks error counts (e.g., repeated blocks, timeouts, excessive NAKs).
+ *   - `NCGbyte` (uint8_t): The initial control byte sent to synchronize with the sender, typically `'C'`.
+ *   - `KbCan` (bool): True if a keyboard cancel command (`KB_C`) has been issued.
+ *   - `anotherFile` (bool): True if another file exists in the batch transfer.
+ *   - `transferringFileD` (int): Descriptor for the file currently being sent (-1 if no file is open).
+ *   - `result` (std::string): Logs the result or status of the session (e.g., "Done", "Cancelled").
+ * - **Sender-Specific Variables:**
+ *   - `bytesRd` (ssize_t): The number of bytes read from the input file during the last read.
+ *   - `firstBlk` (bool): True if the first block of the file has been sent but not yet acknowledged.
+ *   - `fileName` (std::string): The name of the file currently being sent.
  *
  * Key Methods in `ctx`:
- * - **Session Management:**
+ * - **Common Methods (Sender and Receiver):**
  *   - `cans()`: Sends multiple CAN characters to cancel the session.
  *   - `clearCan()`: Clears consecutive CAN characters from the peer.
- * - **Block Validation:**
- *   - `getRestBlk()`: Reads and validates the remaining bytes of a block after SOH.
- *   - `writeChunk()`: Writes valid block data to disk.
- * - **Communication:**
- *   - `sendByte(uint8_t)`: Sends a single byte to the peer.
- * - **Timeout Management:**
- *   - `tm(int tmSeconds)`: Sets an absolute timeout.
- *   - `tmPush(int tmSeconds)`: Temporarily adjusts the timeout.
- *   - `tmPop()`: Restores the previous timeout.
- *   - `tmRed(int secsToReduce)`: Reduces the current timeout.
- * - **File Management:**
- *   - `checkForAnotherFile()`: Checks if another file exists for transfer (triggered at the end of a file).
- * - **Buffer Management:**
  *   - `purge()`: Clears the input buffer.
+ *   - `sendByte(uint8_t)`: Sends a single byte to the peer.
+ *   - `tm(int tmSeconds)`, `tmPush(int tmSeconds)`, `tmPop()`, `tmRed(int secsToReduce)`: Manage timeouts.
+ *   - `checkForAnotherFile()`: Checks if another file exists for transfer.
+ * - **Sender-Specific Methods:**
+ *   - `sendBlkPrepNext()`: Sends the most recently prepared block (minus its last byte) and prepares the next one.
+ *   - `resendBlk()`: Resends the most recently sent block or the zero-numbered "stat" block.
  */
+
 /*
  * Sends multiple CAN characters to notify the peer of session cancellation.
  *
@@ -163,6 +162,43 @@ void tmRed(int secsToReduce);
  * - `ctx.transferringFileD`: Used to manage file descriptors during transfer.
  */
 void checkForAnotherFile();
+
+/*
+ * Prepares and sends the next block of data.
+ *
+ * Key Features:
+ * - Sends the most recently prepared block, excluding its last byte.
+ * - Reads the next block from the file and prepares it for transmission.
+ * - Handles glitch characters by dumping them before sending the last byte.
+ *
+ * Context Variables:
+ * - `ctx.bytesRd`: Updated with the number of bytes read from the file.
+ * - `ctx.firstBlk`: Reset to false once the first block has been acknowledged.
+ */
+
+void sendBlkPrepNext();
+/*
+ * Resends the most recently sent block.
+ *
+ * Key Features:
+ * - Resends the previously sent block or a zero-numbered "stat" block.
+ * - Dumps glitch characters before sending the last byte.
+ *
+ * Context Variables:
+ * - `ctx.errCnt`: Incremented after each resend to track retries.
+ */
+void resendBlk();
+
+/*
+ * Clears consecutive CAN characters received from the peer.
+ *
+ * Key Features:
+ * - Reads up to `CAN_LEN - 2` characters or until timeout.
+ * - Stops if a non-CAN character is received.
+ * - Sends a non-CAN character to the console if received.
+ */
+void clearCan();
+
 
 /*
  * Receiver State Descriptions
