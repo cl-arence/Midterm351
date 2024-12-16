@@ -1,1 +1,92 @@
+void coutThreadFunc(void) {
+   int RetVal;
+   CircBuf<char> buffer;
+   buffer.write("1234", 5); // don't forget NUL termination character NULL != " "
+   buffer.write("bodo", 4);
+   RetVal = buffer.read(B, BSize);
+   cout << "Output Line 1 - RetVal: " << RetVal << "  B: " << B << endl;
+   cout << "The next line will timeout in 5 or so seconds (50 deciseconds)" << endl;
+   RetVal = myReadcond(daSktPr[1], B, BSize, 10, 50, 50);
 
+   cout << "Output Line 2 - RetVal: " << RetVal << "  B: " << B << endl;
+   myWrite(daSktPr[1], "wxyz", 5); // don't forget NUL termination char
+
+   myWrite(daSktPr[0], "babi", 5); // don't forget NUL termination character
+   RetVal = myReadcond(daSktPr[1], B, 2, 2, 0, 0);
+
+   cout << "Output Line 3 - RetVal: " << RetVal;
+   if (RetVal == -1)
+      cout << " Error:  " << strerror(errno);
+   else if (RetVal > 0)
+      cout << "  B: " << B;
+   cout << endl;
+   RetVal = myReadcond(daSktPr[1], B, 2, 1, 0, 0);
+   cout << "Output Line 4 - RetVal: " << RetVal;
+   if (RetVal == -1)
+      cout << " Error:  " << strerror(errno);
+   else if (RetVal > 0)
+      cout << "  B: " << B;
+   cout << endl;
+   RetVal = myReadcond(daSktPr[1], B, BSize, 5, 0, 0);
+   cout << "Output Line 4b- RetVal: " << RetVal;
+   if (RetVal == -1)
+      cout << " Error:  " << strerror(errno);
+   else if (RetVal > 0)
+      cout << "  B: " << B;
+   cout << endl;
+   RetVal = myWrite(daSktPr[1], "123456789", 10); // don't forget NUL termination char
+   cout << "Output Line 5-1 - RetVal: " << RetVal;
+   if (RetVal == -1)
+      cout << " Error:  " << strerror(errno) << endl;
+   else cout << endl;
+   RetVal = myWrite(daSktPr[0], "123456789", 10); // don't forget NUL termination char
+   cout << "Output Line 5-0 - RetVal: " << RetVal;
+   if (RetVal == -1)
+      cout << " Error:  " << strerror(errno) << endl;
+   else cout << endl;
+}
+
+int main() { // debug launch configuration ensures gdbserver runs at FIFO priority 98 ...
+   cpu_set_t cpu_set;
+   CPU_ZERO(&cpu_set);
+   CPU_SET(0, &cpu_set);
+   const char* threadName = "Pri";
+   pthread_setname_np(pthread_self(), threadName);
+   sched_setaffinity(0, sizeof(cpu_set), &cpu_set); // set processor affinity
+
+   try {    // ... a realtime policy.
+      sched_param sch;
+      sch.__sched_priority = 60;
+      pthreadSupport::setSchedParam(SCHED_FIFO, sch); //SCHED_FIFO == 1, SCHED_RR == 2
+      mySocketpair(AF_LOCAL, SOCK_STREAM, 0, daSktPr);
+      myWrite(daSktPr[0], "abcde", 5);
+      pthreadSupport::posixThread coutThread(SCHED_FIFO, 50, coutThreadFunc); // lower
+      myTcdrain(daSktPr[0]);
+
+      myWrite(daSktPr[0], "1234", 5); // don't forget NUL termination character
+      myReadcond(daSktPr[0], B2, 4, 4, 0, 0);
+      cout << "Output Line B2: " << B2 <<endl;
+
+      pthreadSupport::setSchedPrio(40);
+
+      myClose(daSktPr[0]);
+
+      coutThread.join();
+      return 0;
+   }
+   catch (system_error& error) {
+      cout << "Error: " << error.code() << " - " << error.what() << '\n';
+   }
+   catch (...) { throw; }
+}
+
+Output:
+Output Line 1 - RetVal: 8  B: 1234
+The next line will timeout in 5 or so seconds (50 deciseconds)
+Output Line 2 - RetVal: 8  B: abcde123
+Output Line B2: wxyz
+Output Line 3 - RetVal: 2  B: bacde123
+Output Line 4 - RetVal: 2  B: bicde123
+Output Line 4b- RetVal: 1  B: 
+Output Line 5-1 - RetVal: -1 Error:  Broken pipe
+Output Line 5-0 - RetVal: -1 Error:  Bad file descriptor
